@@ -3,7 +3,7 @@ package session
 import (
 	nethttp "net/http"
 
-	apihttp "go.naturallyfunny.dev/api/http"
+	apihttp "go.trueardian.com/api/http"
 )
 
 func HTTPWithID(next nethttp.Handler) nethttp.Handler {

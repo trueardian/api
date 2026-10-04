@@ -1,7 +1,7 @@
 # api
 
 [![Test](https://github.com/naturallyfunny/api-go/actions/workflows/test.yaml/badge.svg)](https://github.com/naturallyfunny/api-go/actions/workflows/test.yaml)
-[![Go Reference](https://pkg.go.dev/badge/go.naturallyfunny.dev/api.svg)](https://pkg.go.dev/go.naturallyfunny.dev/api)
+[![Go Reference](https://pkg.go.dev/badge/go.trueardian.com/api.svg)](https://pkg.go.dev/go.trueardian.com/api)
 ![Go 1.25](https://img.shields.io/badge/go-1.25-00ADD8?logo=go&logoColor=white)
 ![Dependencies: none](https://img.shields.io/badge/dependencies-0-success)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
@@ -88,15 +88,15 @@ no code generation, no configuration file. That is the point.
 ## Install
 
 ```sh
-go get go.naturallyfunny.dev/api
+go get go.trueardian.com/api
 ```
 
 ```go
 import (
-	apihttp "go.naturallyfunny.dev/api/http"
-	"go.naturallyfunny.dev/api/session"
-	apitime "go.naturallyfunny.dev/api/time"
-	"go.naturallyfunny.dev/api/user"
+	apihttp "go.trueardian.com/api/http"
+	"go.trueardian.com/api/session"
+	apitime "go.trueardian.com/api/time"
+	"go.trueardian.com/api/user"
 )
 ```
 
@@ -119,10 +119,10 @@ package main
 import (
 	"net/http"
 
-	apihttp "go.naturallyfunny.dev/api/http"
-	"go.naturallyfunny.dev/api/session"
-	apitime "go.naturallyfunny.dev/api/time"
-	"go.naturallyfunny.dev/api/user"
+	apihttp "go.trueardian.com/api/http"
+	"go.trueardian.com/api/session"
+	apitime "go.trueardian.com/api/time"
+	"go.trueardian.com/api/user"
 )
 
 func main() {
