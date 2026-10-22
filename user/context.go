@@ -1,3 +1,4 @@
+// Package user carries the caller's user ID from the user-id header into context.Context.
 package user
 
 import (
@@ -7,19 +8,16 @@ import (
 
 type key struct{}
 
-var ContextKey = key{}
-
+// ContextWithID returns a copy of ctx carrying id, which must not be empty.
 func ContextWithID(ctx context.Context, id string) (context.Context, error) {
 	if id == "" {
-		return ctx, errors.New("user ID cannot be empty")
+		return nil, errors.New("user ID cannot be empty")
 	}
-	return context.WithValue(ctx, ContextKey, id), nil
+	return context.WithValue(ctx, key{}, id), nil
 }
 
-func IDFromContext(ctx context.Context) (string, error) {
-	val, ok := ctx.Value(ContextKey).(string)
-	if !ok || val == "" {
-		return "", errors.New("user ID not found in context")
-	}
-	return val, nil
+// IDFromContext returns the user ID stored in ctx, if any.
+func IDFromContext(ctx context.Context) (string, bool) {
+	id, ok := ctx.Value(key{}).(string)
+	return id, ok
 }

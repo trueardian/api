@@ -1,7 +1,8 @@
 package session
 
 import (
-	nethttp "net/http"
+	"context"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 )
@@ -13,8 +14,8 @@ func TestHTTPWithID(t *testing.T) {
 		wantStatus int
 		wantNext   bool
 	}{
-		{name: "present", header: "s_789", wantStatus: nethttp.StatusOK, wantNext: true},
-		{name: "absent", header: "", wantStatus: nethttp.StatusUnauthorized, wantNext: false},
+		{name: "present", header: "s_789", wantStatus: http.StatusOK, wantNext: true},
+		{name: "absent", header: "", wantStatus: http.StatusUnauthorized, wantNext: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -22,13 +23,13 @@ func TestHTTPWithID(t *testing.T) {
 				nextCalled bool
 				gotID      string
 			)
-			next := nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				nextCalled = true
 				gotID, _ = IDFromContext(r.Context())
-				w.WriteHeader(nethttp.StatusOK)
+				w.WriteHeader(http.StatusOK)
 			})
 
-			req := httptest.NewRequest(nethttp.MethodGet, "/", nil)
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
 			if tt.header != "" {
 				req.Header.Set("session-id", tt.header)
 			}
@@ -49,5 +50,24 @@ func TestHTTPWithID(t *testing.T) {
 				t.Error("expected a problem body on rejection, got empty")
 			}
 		})
+	}
+}
+
+func TestPropagateID(t *testing.T) {
+	ctx, err := ContextWithID(context.Background(), "s_789")
+	if err != nil {
+		t.Fatalf("ContextWithID: %v", err)
+	}
+
+	h := http.Header{}
+	PropagateID(ctx, h)
+	if got := h.Get("session-id"); got != "s_789" {
+		t.Errorf("header = %q, want s_789", got)
+	}
+
+	h = http.Header{}
+	PropagateID(context.Background(), h)
+	if len(h) != 0 {
+		t.Errorf("header set on empty context: %v", h)
 	}
 }

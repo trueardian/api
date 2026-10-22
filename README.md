@@ -14,17 +14,17 @@ go get go.trueardian.com/api
 
 ## The packages
 
-| Package       | What it is                                                              | Provides                 | Depends on |
-| ------------- | ----------------------------------------------------------------------- | ------------------------ | ---------- |
-| `api/user`    | Reads the `user-id` header into the context. `401` when it's missing.    | `user.HTTPWithID`        | `api/http` |
-| `api/session` | Reads the `session-id` header into the context. `401` when it's missing. | `session.HTTPWithID`     | `api/http` |
-| `api/time`    | Reads the `time-zone` header into the context. `400` when it's invalid.  | `time.HTTPWithZone`      | `api/http` |
-| `api/http`    | Writes context values back as headers on outbound requests, and JSON responses. | `*http.Transport` |            |
+| Package        | What it is                                                                      | Provides                                          | Depends on |
+| -------------- | ------------------------------------------------------------------------------- | ------------------------------------------------- | ---------- |
+| `api/user`     | Carries the `user-id` header. `401` when it's missing.                          | `user.HTTPWithID`, `user.PropagateID`             | `api`      |
+| `api/session`  | Carries the `session-id` header. `401` when it's missing.                       | `session.HTTPWithID`, `session.PropagateID`       | `api`      |
+| `api/timezone` | Carries the `time-zone` header. `400` when it's invalid.                        | `timezone.HTTPWithZone`, `timezone.PropagateZone` | `api`      |
+| `api`          | Writes context values back as headers on outbound requests, and JSON responses. | `*api.Transport`                                  |            |
 
 ```
-user ────┐
-session ─┼─▶ http
-time ────┘
+user ─────┐
+session ──┼─▶ api
+timezone ─┘
 ```
 
 The whole module is standard library only, so `go get` pulls in nothing else. Only import what you
@@ -47,12 +47,12 @@ right there with a `401` and `{"detail":"user ID cannot be empty"}`, so your han
 without one. Then, anywhere below it:
 
 ```go
-uid, err := user.IDFromContext(r.Context())
+uid, ok := user.IDFromContext(r.Context())
 ```
 
-Behind the middleware that error never fires. It's there for code reached some other way, like a
-cron job or a test, where nobody filled the context. Not coming from HTTP at all? Fill it yourself
-with `user.ContextWithID(ctx, id)`, which runs the same empty check without the header.
+Behind the middleware `ok` is always true. It's there for code reached some other way, like a cron
+job or a test, where nobody filled the context. Not coming from HTTP at all? Fill it yourself with
+`user.ContextWithID(ctx, id)`, which runs the same empty check without the header.
 
 The header is `user-id`, not `X-User-Id`. The `X-` prefix was retired by
 [RFC 6648](https://www.rfc-editor.org/rfc/rfc6648) back in 2012, and HTTP/2 lowercases every header
@@ -66,52 +66,46 @@ Exactly the same as `user`, for the `session-id` header:
 ```go
 handler := session.HTTPWithID(mux)
 
-sid, err := session.IDFromContext(r.Context())
+sid, ok := session.IDFromContext(r.Context())
 ```
 
 Missing or empty is a `401` here too, and `session.ContextWithID(ctx, id)` is there for when you
 fill it yourself.
 
-## `package time`
+## `package timezone`
 
 So you want to show times in the caller's own timezone, but the server runs in UTC? Have them send
 an IANA name like `Asia/Jakarta` in the `time-zone` header:
 
 ```go
-import apitime "go.trueardian.com/api/time"
+handler := timezone.HTTPWithZone(mux)
 
-handler := apitime.HTTPWithZone(mux)
-
-tz, err := apitime.ZoneFromContext(r.Context())
+loc, ok := timezone.ZoneFromContext(r.Context())
 ```
 
-The name is checked with `time.LoadLocation` before it goes into the context, so `Mars/Olympus`
-never reaches your handler. That one is a `400`, not a `401`, because a bad timezone is a malformed
-request, not an unknown caller. What you get back is the name itself, so `time.LoadLocation(tz)` it
-when you need the `*time.Location`.
-
-Do note the package is named `time`, same as the standard library, so alias it on import.
+The name is loaded with `time.LoadLocation` before it goes into the context, so `Mars/Olympus`
+never reaches your handler, and neither does `Local`, which would quietly hand you the server's own
+zone. That one is a `400`, not a `401`, because a bad timezone is a malformed request, not an
+unknown caller. What you get back is the `*time.Location` itself, ready for `t.In(loc)`.
 
 Stack all three in any order. Each one stops the request on its own:
 
 ```go
-handler := user.HTTPWithID(session.HTTPWithID(apitime.HTTPWithZone(mux)))
+handler := user.HTTPWithID(session.HTTPWithID(timezone.HTTPWithZone(mux)))
 ```
 
-## `package http`
+## `package api`
 
 So the context is filled, and now your handler calls the next service, which wants those same
 headers? I got you.
 
 ```go
-import apihttp "go.trueardian.com/api/http"
-
 client := &http.Client{
-    Transport: &apihttp.Transport{
-        Propagators: []apihttp.Propagator{
-            apihttp.WithHeader(user.ContextKey, "user-id"),
-            apihttp.WithHeader(session.ContextKey, "session-id"),
-            apihttp.WithHeader(apitime.ContextKey, "time-zone"),
+    Transport: &api.Transport{
+        Propagators: []api.Propagator{
+            user.PropagateID,
+            session.PropagateID,
+            timezone.PropagateZone,
         },
     },
 }
@@ -120,29 +114,25 @@ req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, "https://dow
 resp, err := client.Do(req)
 ```
 
-Every request through that client gets the values from its context written back as headers. A value
-that isn't there is skipped, so the same client works for anonymous calls too. `Base` takes your own
-`RoundTripper`, and leaving it nil means `http.DefaultTransport`. The request is cloned before any
-header is set, because a `RoundTripper` must never modify the request it was handed.
+Every request through that client gets the values from its context written back as headers, under
+the same names the middleware reads them from. A value that isn't there is skipped, so the same
+client works for anonymous calls too. `Base` takes your own `RoundTripper`, and leaving it nil means
+`http.DefaultTransport`. The request is cloned before any header is set, because a `RoundTripper`
+must never modify the request it was handed.
 
-`user.ContextKey` is exported so `WithHeader` can name it from another package, but its type isn't,
-so no other package can make a key that collides with it. `WithHeader` only copies a non-empty
-string. Want anything else on the wire? A `Propagator` is just `func(ctx, header)`, so write your
-own.
+Want anything else on the wire? A `Propagator` is just `func(ctx, header)`, so write your own.
 
 The package also has the two writers the middleware answers with:
 
 ```go
-apihttp.WriteJSON(w, http.StatusOK, payload)
-apihttp.WriteProblem(w, http.StatusUnprocessableEntity, map[string]any{"detail": "..."})
+api.WriteJSON(w, http.StatusOK, payload)
+api.WriteProblem(w, http.StatusUnprocessableEntity, map[string]any{"detail": "..."})
 ```
 
 They are identical today, and that's on purpose. `WriteProblem` is the one that grows into
 [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) problem details, so every error call site is
-already pointing at the right function when it does. A body that fails to encode gets logged,
-because the status is already sent by then.
-
-Same as `time`, the package name collides with the standard library, so alias it.
+already pointing at the right function when it does. The body is marshalled before the status is
+sent, so one that can't be encoded becomes a `500` instead of a `200` with nothing in it.
 
 ## What this library doesn't do
 

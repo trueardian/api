@@ -1,21 +1,31 @@
 package session
 
 import (
-	nethttp "net/http"
+	"context"
+	"net/http"
 
-	apihttp "go.trueardian.com/api/http"
+	"go.trueardian.com/api"
 )
 
-func HTTPWithID(next nethttp.Handler) nethttp.Handler {
-	return nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
-		id := r.Header.Get("session-id")
-		ctx, err := ContextWithID(r.Context(), id)
+const header = "session-id"
+
+// HTTPWithID stores the session-id header in the request context, or responds 401 when it is empty.
+func HTTPWithID(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx, err := ContextWithID(r.Context(), r.Header.Get(header))
 		if err != nil {
-			apihttp.WriteProblem(w, nethttp.StatusUnauthorized, map[string]any{
+			api.WriteProblem(w, http.StatusUnauthorized, map[string]any{
 				"detail": err.Error(),
 			})
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// PropagateID sets the session-id header from ctx, if present.
+func PropagateID(ctx context.Context, h http.Header) {
+	if id, ok := IDFromContext(ctx); ok {
+		h.Set(header, id)
+	}
 }

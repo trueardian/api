@@ -1,8 +1,8 @@
-package http
+package api
 
 import (
 	"encoding/json"
-	nethttp "net/http"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 )
@@ -10,10 +10,10 @@ import (
 func TestWriteJSON(t *testing.T) {
 	rec := httptest.NewRecorder()
 
-	WriteJSON(rec, nethttp.StatusCreated, map[string]any{"ok": true})
+	WriteJSON(rec, http.StatusCreated, map[string]any{"ok": true})
 
-	if rec.Code != nethttp.StatusCreated {
-		t.Errorf("status = %d, want %d", rec.Code, nethttp.StatusCreated)
+	if rec.Code != http.StatusCreated {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusCreated)
 	}
 	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
 		t.Errorf("content-type = %q, want application/json", ct)
@@ -31,10 +31,10 @@ func TestWriteJSON(t *testing.T) {
 func TestWriteJSON_NilPayload(t *testing.T) {
 	rec := httptest.NewRecorder()
 
-	WriteJSON(rec, nethttp.StatusNoContent, nil)
+	WriteJSON(rec, http.StatusNoContent, nil)
 
-	if rec.Code != nethttp.StatusNoContent {
-		t.Errorf("status = %d, want %d", rec.Code, nethttp.StatusNoContent)
+	if rec.Code != http.StatusNoContent {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusNoContent)
 	}
 	if rec.Body.Len() != 0 {
 		t.Errorf("expected empty body for nil payload, got %q", rec.Body.String())
@@ -44,10 +44,10 @@ func TestWriteJSON_NilPayload(t *testing.T) {
 func TestWriteProblem(t *testing.T) {
 	rec := httptest.NewRecorder()
 
-	WriteProblem(rec, nethttp.StatusBadRequest, map[string]any{"detail": "boom"})
+	WriteProblem(rec, http.StatusBadRequest, map[string]any{"detail": "boom"})
 
-	if rec.Code != nethttp.StatusBadRequest {
-		t.Errorf("status = %d, want %d", rec.Code, nethttp.StatusBadRequest)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
 	}
 	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
 		t.Errorf("content-type = %q, want application/json", ct)
@@ -59,5 +59,25 @@ func TestWriteProblem(t *testing.T) {
 	}
 	if body["detail"] != "boom" {
 		t.Errorf("body[detail] = %v, want boom", body["detail"])
+	}
+}
+
+func TestWriteJSON_UnmarshalablePayload(t *testing.T) {
+	rec := httptest.NewRecorder()
+
+	WriteJSON(rec, http.StatusOK, map[string]any{"ch": make(chan int)})
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
+	}
+}
+
+func TestWriteProblem_UnmarshalableProblem(t *testing.T) {
+	rec := httptest.NewRecorder()
+
+	WriteProblem(rec, http.StatusBadRequest, map[string]any{"ch": make(chan int)})
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
 	}
 }

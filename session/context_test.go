@@ -24,9 +24,9 @@ func TestContextWithID(t *testing.T) {
 				return
 			}
 
-			got, err := IDFromContext(ctx)
-			if err != nil {
-				t.Fatalf("IDFromContext() unexpected error: %v", err)
+			got, ok := IDFromContext(ctx)
+			if !ok {
+				t.Fatal("IDFromContext() ok = false, want true")
 			}
 			if got != tt.id {
 				t.Errorf("IDFromContext() = %q, want %q", got, tt.id)
@@ -36,7 +36,7 @@ func TestContextWithID(t *testing.T) {
 }
 
 func TestIDFromContext_Absent(t *testing.T) {
-	if _, err := IDFromContext(context.Background()); err == nil {
-		t.Fatal("IDFromContext() on empty context: expected error, got nil")
+	if _, ok := IDFromContext(context.Background()); ok {
+		t.Fatal("IDFromContext() on empty context: ok = true, want false")
 	}
 }
