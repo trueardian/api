@@ -1,89 +1,10 @@
 # api
 
-[![Test](https://github.com/naturallyfunny/api-go/actions/workflows/test.yaml/badge.svg)](https://github.com/naturallyfunny/api-go/actions/workflows/test.yaml)
 [![Go Reference](https://pkg.go.dev/badge/go.trueardian.com/api.svg)](https://pkg.go.dev/go.trueardian.com/api)
-![Go 1.25](https://img.shields.io/badge/go-1.25-00ADD8?logo=go&logoColor=white)
-![Dependencies: none](https://img.shields.io/badge/dependencies-0-success)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+![Go 1.25+](https://img.shields.io/badge/go-1.25%2B-00ADD8)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A small, dependency-free toolkit for moving request-scoped identity and context
-between **HTTP headers** and Go's **`context.Context`** — in both directions,
-using nothing but the standard library.
-
-```
-        inbound request                                outbound request
-  ┌──────────────────────────┐                   ┌──────────────────────────┐
-  │  user-id: u_123          │                   │  user-id: u_123          │
-  │  session-id: s_789       │                   │  session-id: s_789       │
-  │  time-zone: Asia/Jakarta │                   │  time-zone: Asia/Jakarta │
-  └───────────┬──────────────┘                   └─────────────▲────────────┘
-              │  HTTPWith… (ingest middleware)                 │  Transport + Propagator
-              ▼                                                │  (re-emit)
-        context.Context ───────────►  your handler  ───────────┘
-        user.ContextKey = u_123        business logic
-        session.ContextKey = s_789     downstream calls
-        time.ContextKey  = Asia/Jakarta
-```
-
-The middleware **reads** headers into the context at the edge of your service.
-The `http.Transport` **writes** those same values back onto every outbound
-request. The loop is symmetric on purpose: context that enters your service can
-be propagated, unchanged, to the services it calls.
-
----
-
-## Table of contents
-
-- [Why this exists](#why-this-exists)
-- [Design principles](#design-principles)
-- [Install](#install)
-- [Quick start (end-to-end)](#quick-start-end-to-end)
-- [Packages](#packages)
-- [Design decisions & trade-offs](#design-decisions--trade-offs)
-- [Non-goals](#non-goals)
-- [Compatibility](#compatibility)
-- [Layout](#layout)
-- [Verification](#verification)
-- [Status & roadmap](#status--roadmap)
-- [License](#license)
-
----
-
-## Why this exists
-
-Almost every HTTP service ends up doing the same three chores:
-
-1. Pull a handful of ambient values off the incoming request — who the caller
-   is, which session they belong to, which timezone to render times in.
-2. Carry those values through the call stack without threading a parameter
-   through every function signature.
-3. Put them back on the wire when calling the next service, so the trail is not
-   lost at the first hop.
-
-None of that is hard. It is, however, easy to do *inconsistently* — a slightly
-different context key here, a header typo there, a validation check that one
-handler forgot. This module is the boring, correct version of those three
-chores, factored into packages small enough to read in a single sitting and
-audit line by line.
-
-It is deliberately unambitious. There is no framework, no router, no reflection,
-no code generation, no configuration file. That is the point.
-
-## Design principles
-
-- **Standard library only.** `go.mod` has zero `require` lines. Depending on
-  this module pulls in nothing else. See [Compatibility](#compatibility).
-- **Small packages named for what they provide.** `user.IDFromContext`,
-  `session.HTTPWithID`, `time.ZoneFromContext` read as sentences. The package
-  name *is* part of the API.
-- **Fail closed at the boundary.** Constructors validate their input and return
-  an `error`; invalid data never reaches your context.
-- **Honest names over ceremonial ones.** Headers are `user-id`, `session-id`,
-  `time-zone` — not `X-`-prefixed. See
-  [the header naming decision](#3-non-standard-lowercase-header-names) for why
-  that is the *more* correct choice, with citations.
-- **No magic.** Every exported symbol does exactly one obvious thing. If a
-  reviewer has to guess what a line does, that line is a bug.
+A Go library that carries who's calling from HTTP headers into `context.Context`, and back out again.
 
 ## Install
 
@@ -91,397 +12,153 @@ no code generation, no configuration file. That is the point.
 go get go.trueardian.com/api
 ```
 
-```go
-import (
-	apihttp "go.trueardian.com/api/http"
-	"go.trueardian.com/api/session"
-	apitime "go.trueardian.com/api/time"
-	"go.trueardian.com/api/user"
-)
+## The packages
+
+| Package       | What it is                                                              | Provides                 | Depends on |
+| ------------- | ----------------------------------------------------------------------- | ------------------------ | ---------- |
+| `api/user`    | Reads the `user-id` header into the context. `401` when it's missing.    | `user.HTTPWithID`        | `api/http` |
+| `api/session` | Reads the `session-id` header into the context. `401` when it's missing. | `session.HTTPWithID`     | `api/http` |
+| `api/time`    | Reads the `time-zone` header into the context. `400` when it's invalid.  | `time.HTTPWithZone`      | `api/http` |
+| `api/http`    | Writes context values back as headers on outbound requests, and JSON responses. | `*http.Transport` |            |
+
+```
+user ────┐
+session ─┼─▶ http
+time ────┘
 ```
 
-> The `http` and `time` packages intentionally share their name with the
-> standard library. Alias them at the import site (`apihttp`, `apitime`) rather
-> than renaming the packages — the domain name is the right name; the collision
-> is the caller's to resolve. See
-> [the aliasing decision](#7-owning-a-package-named-http).
+The whole module is standard library only, so `go get` pulls in nothing else. Only import what you
+need. Below are the explanations and guides.
 
-## Quick start (end-to-end)
+## `package user`
 
-The two halves below are the whole library in use: ingest on the way in,
-propagate on the way out.
+So your service sits behind a gateway that already knows who the caller is, and passes it along as
+a header? Then every handler wants that user ID, and you don't want to thread it through every
+function signature to get it there. I got you.
 
-### Server — headers into context
+Wrap your mux:
 
 ```go
-package main
-
-import (
-	"net/http"
-
-	apihttp "go.trueardian.com/api/http"
-	"go.trueardian.com/api/session"
-	apitime "go.trueardian.com/api/time"
-	"go.trueardian.com/api/user"
-)
-
-func main() {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /whoami", whoami)
-
-	// Compose the ingest middleware. Each layer is fail-closed: a missing or
-	// invalid header short-circuits with a problem response, so `whoami` only
-	// ever runs with a fully populated context.
-	handler := user.HTTPWithID(
-		session.HTTPWithID(
-			apitime.HTTPWithZone(mux),
-		),
-	)
-
-	_ = http.ListenAndServe(":8080", handler)
-}
-
-func whoami(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-
-	// The errors are safe to ignore here precisely because the middleware
-	// already guaranteed these values are present and valid.
-	uid, _ := user.IDFromContext(ctx)
-	sid, _ := session.IDFromContext(ctx)
-	tz, _ := apitime.ZoneFromContext(ctx)
-
-	apihttp.WriteJSON(w, http.StatusOK, map[string]any{
-		"user":     uid,
-		"session":  sid,
-		"timezone": tz,
-	})
-}
+handler := user.HTTPWithID(mux)
 ```
 
-Try it:
-
-```sh
-curl -s localhost:8080/whoami \
-  -H 'user-id: u_123' \
-  -H 'session-id: s_789' \
-  -H 'time-zone: Asia/Jakarta'
-# {"session":"s_789","timezone":"Asia/Jakarta","user":"u_123"}
-
-curl -si localhost:8080/whoami -H 'session-id: s_789' -H 'time-zone: Asia/Jakarta'
-# HTTP/1.1 401 Unauthorized
-# {"detail":"user ID cannot be empty"}
-
-curl -si localhost:8080/whoami -H 'user-id: u_123' -H 'session-id: s_789' -H 'time-zone: Mars/Olympus'
-# HTTP/1.1 400 Bad Request
-# {"detail":"invalid IANA timezone \"Mars/Olympus\": unknown time zone Mars/Olympus"}
-```
-
-### Client — context back onto the wire
+It reads the `user-id` header and puts it into the context. Missing or empty, and the request stops
+right there with a `401` and `{"detail":"user ID cannot be empty"}`, so your handler never runs
+without one. Then, anywhere below it:
 
 ```go
-// Build a client that re-emits the ambient identity on every outbound request.
-// Installing a propagator is always safe: it is a no-op when the value is
-// absent from the context, so the same client works for authenticated and
-// anonymous flows alike.
+uid, err := user.IDFromContext(r.Context())
+```
+
+Behind the middleware that error never fires. It's there for code reached some other way, like a
+cron job or a test, where nobody filled the context. Not coming from HTTP at all? Fill it yourself
+with `user.ContextWithID(ctx, id)`, which runs the same empty check without the header.
+
+The header is `user-id`, not `X-User-Id`. The `X-` prefix was retired by
+[RFC 6648](https://www.rfc-editor.org/rfc/rfc6648) back in 2012, and HTTP/2 lowercases every header
+name on the wire anyway, so this is just the honest name. Go matches header names
+case-insensitively, so a caller sending `User-Id` works too.
+
+## `package session`
+
+Exactly the same as `user`, for the `session-id` header:
+
+```go
+handler := session.HTTPWithID(mux)
+
+sid, err := session.IDFromContext(r.Context())
+```
+
+Missing or empty is a `401` here too, and `session.ContextWithID(ctx, id)` is there for when you
+fill it yourself.
+
+## `package time`
+
+So you want to show times in the caller's own timezone, but the server runs in UTC? Have them send
+an IANA name like `Asia/Jakarta` in the `time-zone` header:
+
+```go
+import apitime "go.trueardian.com/api/time"
+
+handler := apitime.HTTPWithZone(mux)
+
+tz, err := apitime.ZoneFromContext(r.Context())
+```
+
+The name is checked with `time.LoadLocation` before it goes into the context, so `Mars/Olympus`
+never reaches your handler. That one is a `400`, not a `401`, because a bad timezone is a malformed
+request, not an unknown caller. What you get back is the name itself, so `time.LoadLocation(tz)` it
+when you need the `*time.Location`.
+
+Do note the package is named `time`, same as the standard library, so alias it on import.
+
+Stack all three in any order. Each one stops the request on its own:
+
+```go
+handler := user.HTTPWithID(session.HTTPWithID(apitime.HTTPWithZone(mux)))
+```
+
+## `package http`
+
+So the context is filled, and now your handler calls the next service, which wants those same
+headers? I got you.
+
+```go
+import apihttp "go.trueardian.com/api/http"
+
 client := &http.Client{
-	Transport: &apihttp.Transport{
-		Propagators: []apihttp.Propagator{
-			apihttp.WithHeader(user.ContextKey, "user-id"),
-			apihttp.WithHeader(session.ContextKey, "session-id"),
-			apihttp.WithHeader(apitime.ContextKey, "time-zone"),
-		},
-	},
+    Transport: &apihttp.Transport{
+        Propagators: []apihttp.Propagator{
+            apihttp.WithHeader(user.ContextKey, "user-id"),
+            apihttp.WithHeader(session.ContextKey, "session-id"),
+            apihttp.WithHeader(apitime.ContextKey, "time-zone"),
+        },
+    },
 }
 
-// `ctx` flows in from the inbound request (r.Context()); the identity rides
-// along to the downstream service without any manual header plumbing.
-req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://downstream/internal", nil)
+req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, "https://downstream.example.com/internal", nil)
 resp, err := client.Do(req)
 ```
 
-That is the complete round trip: `HTTPWithID` put `u_123` into the context on
-the way in; `WithHeader(user.ContextKey, "user-id")` took it back out on the way
-out — and the key that links the two is exported but
-[impossible to forge](#2-an-exported-context-key-of-an-unexported-type).
+Every request through that client gets the values from its context written back as headers. A value
+that isn't there is skipped, so the same client works for anonymous calls too. `Base` takes your own
+`RoundTripper`, and leaving it nil means `http.DefaultTransport`. The request is cloned before any
+header is set, because a `RoundTripper` must never modify the request it was handed.
 
-## Packages
+`user.ContextKey` is exported so `WithHeader` can name it from another package, but its type isn't,
+so no other package can make a key that collides with it. `WithHeader` only copies a non-empty
+string. Want anything else on the wire? A `Propagator` is just `func(ctx, header)`, so write your
+own.
 
-| Package                       | Ingest (header → context)              | Accessor (context → value)      | Context handle          |
-| ----------------------------- | -------------------------------------- | ------------------------------- | ----------------------- |
-| `.../user`                    | `HTTPWithID` — `user-id` → **401**     | `IDFromContext`                 | `user.ContextKey`       |
-| `.../session`                 | `HTTPWithID` — `session-id` → **401**  | `IDFromContext`                 | `session.ContextKey`    |
-| `.../time`                    | `HTTPWithZone` — `time-zone` → **400** | `ZoneFromContext`               | `time.ContextKey`       |
-| `.../http`                    | —                                      | `Transport`, `Propagator`, `WithHeader` | —               |
-| `.../http` (responses)        | —                                      | `WriteJSON`, `WriteProblem`     | —                       |
-
-Each domain package follows the identical two-file shape:
-
-- **`context.go`** — the `ContextKey` handle, a validating `ContextWith…`
-  constructor, and a `…FromContext` accessor. No HTTP knowledge.
-- **`http.go`** — a single middleware that bridges one header to that context
-  value. No business logic.
-
-That regularity is intentional: once you have read one package, you have read
-them all, and adding a fourth (a request ID, a locale, a tenant) is a
-copy-paste-rename away.
-
-## Design decisions & trade-offs
-
-This is the section a reviewer should read. Nothing here is accidental; each
-choice below had a plausible alternative that was considered and rejected for a
-stated reason.
-
-### 1. Per-domain packages, not one `middleware` package
-
-**Choice.** `user`, `session`, and `time` are separate packages, each owning its
-key, constructor, accessor, and middleware.
-
-**Alternative.** A single `middleware` (or `ctxkit`) package with
-`middleware.UserID`, `middleware.SessionID`, and so on — fewer directories,
-one import.
-
-**Why this way.** In Go the package name is a mandatory, un-droppable prefix on
-every identifier, so it should carry meaning. `user.IDFromContext(ctx)` reads as
-a sentence; `middleware.UserIDFromContext(ctx)` stutters and says nothing about
-*user*. Separate packages also mean a consumer that only needs timezones does
-not compile in the user and session code, and each package has a blast radius of
-exactly one concern. The cost — more files, more import lines — is real but
-cheap, and the earlier history of this repo did in fact remove a generic
-middleware abstraction in favour of this shape.
-
-### 2. An exported context key of an *unexported* type
-
-**Choice.**
+The package also has the two writers the middleware answers with:
 
 ```go
-type key struct{}          // unexported type
-var ContextKey = key{}     // exported value of that type
+apihttp.WriteJSON(w, http.StatusOK, payload)
+apihttp.WriteProblem(w, http.StatusUnprocessableEntity, map[string]any{"detail": "..."})
 ```
 
-This is the subtle one, and it is load-bearing.
+They are identical today, and that's on purpose. `WriteProblem` is the one that grows into
+[RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) problem details, so every error call site is
+already pointing at the right function when it does. A body that fails to encode gets logged,
+because the status is already sent by then.
 
-The canonical Go advice is to keep context keys **unexported** to prevent
-collisions between packages ([`context`
-documentation](https://pkg.go.dev/context#WithValue): *"The provided key must be
-comparable and should not be of type string or any other built-in type to avoid
-collisions between packages using context."*). Following that advice literally
-would make the key invisible outside its package — but the outbound
-`Propagator` layer lives in a *different* package (`http`) and must name the key
-to read the value back out.
+Same as `time`, the package name collides with the standard library, so alias it.
 
-The resolution: export the **value** (`ContextKey`) while keeping its **type**
-(`key`) unexported. Because `key` is an unexported, zero-size struct, no other
-package can construct a second `key{}` to collide with it — the type is unique
-to this package and un-nameable from outside. Yet `WithHeader(user.ContextKey,
-…)` can still hand the key across the package boundary as an opaque token.
+## What this library doesn't do
 
-**Alternatives considered.**
-- *Unexported key + an exported getter function passed around* — more
-  indirection, and `Propagator` would need a `func(context.Context) (string,
-  bool)` per key instead of a uniform `any` handle.
-- *An exported `string`/`int` key* — collision-prone and exactly what the
-  standard library warns against.
+- **Authenticate anyone.** It carries an identity, it doesn't verify one. Anyone who can reach your
+  service can send whatever `user-id` they like, so these headers have to come from something you
+  trust at the edge, one that strips them off outside traffic.
+- **Route.** Every middleware is a plain `func(http.Handler) http.Handler`. Bring your own mux.
+- **Logging, tracing or metrics.** A `Propagator` can carry a trace ID just fine, but none ships.
+- **Carry more than these three.** Need a request ID, a locale, a tenant? Write your own, buddy:
+  copy `session`, rename it, and you're done. It's two files. Pull requests are welcome too, though
+  I'm fairly strict about how code is written here, so expect me to refactor yours before merging.
 
-The chosen form is collision-safe *and* usable across packages, which is
-precisely what the two-directional design needs. `struct{}` also costs zero
-bytes.
+## Roadmap
 
-### 3. Non-standard, lowercase header names
-
-**Choice.** `user-id`, `session-id`, `time-zone` — plain, lowercase, no `X-`
-prefix.
-
-**Why not `X-User-Id`.** The `X-` convention is cargo-culted and was formally
-retired years ago:
-
-- **[RFC 6648](https://www.rfc-editor.org/rfc/rfc6648)** (2012) — *"Deprecating
-  the 'X-' Prefix and Similar Constructs in Application Protocols."* The prefix
-  never conferred any protection or special handling; it only created a
-  permanent `X-`/non-`X-` migration problem once a header became standardised.
-- **[RFC 9113 §8.3](https://www.rfc-editor.org/rfc/rfc9113)** (HTTP/2) — field
-  names are **lowercase on the wire regardless**, so any capitalisation you
-  choose is cosmetic. Go's `net/http` canonicalises to `User-Id` for HTTP/1.x
-  presentation ([RFC 9110
-  §5.1](https://www.rfc-editor.org/rfc/rfc9110#section-5.1): field names are
-  case-insensitive), which is why `r.Header.Get("user-id")` and
-  `h.Set("user-id", …)` interoperate cleanly whatever case the source uses.
-
-So `X-` would add letters, add a future rename hazard, and buy nothing. The
-honest name is the correct one. The trade-off we accept in exchange: these
-names are not from any registry, so they must be documented — which is what this
-table and the middleware source do.
-
-### 4. Fail-closed constructors with 401 vs 400 semantics
-
-**Choice.** `ContextWith…` rejects empty input; `ContextWithZone`
-additionally validates the value against `time.LoadLocation`. The middleware
-translates those failures into HTTP status codes that mean different things:
-
-- **Missing/empty `user-id` or `session-id` → `401 Unauthorized`** — the caller
-  has not established *who* they are. ([RFC 9110
-  §15.5.2](https://www.rfc-editor.org/rfc/rfc9110#section-15.5.2).)
-- **Missing/invalid `time-zone` → `400 Bad Request`** — the request itself is
-  malformed; this is not an authentication question. ([RFC 9110
-  §15.5.1](https://www.rfc-editor.org/rfc/rfc9110#section-15.5.1).)
-
-**Why.** Pushing validation to the boundary means every handler downstream can
-treat the context values as trusted and non-empty, and the `_ =` on the
-accessors in the quick start is *safe by construction*, not by laziness. The
-alternative — let handlers each decide what an absent user means — spreads the
-same check across the codebase and invites drift.
-
-**Known nuance (on the roadmap).** A strict reading of RFC 9110 §15.5.2 pairs
-`401` with a `WWW-Authenticate` header. This module omits it because no
-authentication *scheme* is defined here (the header is expected to be set by a
-trusted edge). Emitting a scheme is deferred until one is formalised; `403` is
-the alternative if these headers are ever treated as authorization rather than
-identity.
-
-### 5. `WriteJSON` and `WriteProblem` look identical — on purpose
-
-**Choice.** Two nearly line-for-line functions, one for success payloads and one
-for error payloads.
-
-**Why not one function.** They *are* the same today. They will not stay that
-way, and the call sites should not have to change when they diverge:
-
-- `WriteProblem` is named and shaped after **[RFC 9457](https://www.rfc-editor.org/rfc/rfc9457)**
-  (Problem Details for HTTP APIs, formerly RFC 7807): the `{"detail": …}` body
-  is already the RFC's field. When it grows `type`/`title`/`status` and switches
-  its media type to `application/problem+json`, only `WriteProblem` changes —
-  every error call site is already correct.
-- Reading `WriteProblem(w, 401, …)` at a call site tells you *this is the error
-  path* without decoding the status argument.
-
-The duplication is a deliberate seam for future divergence, and the cost is two
-short, obvious functions. If a linter flags them as clones, that is the linter
-missing the intent, not a defect — this note exists so a human reviewer does
-not make the same mistake.
-
-### 6. `Transport` clones the request before touching headers
-
-**Choice.** `RoundTrip` does `clone := req.Clone(ctx)` and mutates `clone`,
-never `req`.
-
-**Why.** The
-[`http.RoundTripper` contract](https://pkg.go.dev/net/http#RoundTripper) is
-explicit: *"RoundTrip should not modify the request, except for consuming and
-closing the Request's Body."* Callers may retry or inspect the original request;
-mutating it in place is a latent data race and a contract violation. Cloning is
-the small, correct price. `Propagators` run in order, and each is a no-op when
-its value is absent, so a `Transport` is safe to install unconditionally — the
-anonymous path simply emits no identity headers.
-
-### 7. Owning a package named `http`
-
-**Choice.** The response/transport helpers live in a package literally named
-`http`, and internally the code aliases the standard library as
-`nethttp "net/http"`.
-
-**Alternative.** Rename the package (`httpx`, `apihttp`, `transport`) to dodge
-the clash entirely.
-
-**Why this way.** `http` is the honest, minimal name for what the package holds.
-The collision is purely lexical and is resolved with a one-line import alias at
-each site that needs both — a cost paid by the *caller who chose to import
-both*, not baked into the package's identity forever. The same reasoning applies
-to `time`. The README's import block shows the convention (`apihttp`,
-`apitime`), so the friction is documented rather than surprising.
-
-## Non-goals
-
-To keep the surface honest, this module deliberately does **not** provide:
-
-- A router, mux, or framework — bring your own; the middleware is a plain
-  `func(http.Handler) http.Handler`.
-- Authentication or authorization — it *transports* an identity, it does not
-  *verify* one. Trust of the source headers is the edge's job.
-- Structured logging, tracing, or metrics — a `Propagator` can carry a trace ID,
-  but this module ships none.
-- Serialization beyond `encoding/json` for the two response helpers.
-
-## Compatibility
-
-- **Go 1.25+** (per `go.mod`).
-- **Zero external dependencies.** `go.mod` declares no `require`d modules; the
-  entire library is standard-library code. This keeps your dependency graph, and
-  your supply-chain audit, one line longer than it was.
-
-## Layout
-
-The tree is as regular as the API. Each domain package is the same two files, so
-once you have read one, the rest hold no surprises — the point made in
-[Packages](#packages), shown here as a map.
-
-```
-.
-├── user/              user-id    → 401
-│   ├── context.go       ContextKey · ContextWithID · IDFromContext
-│   └── http.go          HTTPWithID middleware
-├── session/           session-id → 401   (structurally identical to user)
-│   ├── context.go
-│   └── http.go
-├── time/              time-zone  → 400   (adds IANA validation)
-│   ├── context.go
-│   └── http.go
-└── http/              the outbound + response half
-    ├── transport.go     Transport · Propagator · WithHeader
-    └── response.go      WriteJSON · WriteProblem
-```
-
-Every source file has a `*_test.go` sibling next to it.
-
-## Verification
-
-Every claim above is backed by table-driven tests you can reproduce:
-
-```sh
-go vet ./...
-go test -race -cover ./...
-```
-
-Observed on the current tree (Go 1.25.11, `-race`):
-
-| Package       | Coverage |
-| ------------- | -------- |
-| `.../user`    | 100.0%   |
-| `.../session` | 100.0%   |
-| `.../time`    | 100.0%   |
-| `.../http`    | 90.5%    |
-
-`go vet ./...` is clean. The three domain packages are fully covered. In `http`
-the only uncovered statements are the `log.Printf` branches of `WriteJSON` /
-`WriteProblem` that fire when `json.Encode` fails writing to the
-`ResponseWriter`. A normal `httptest.ResponseRecorder` cannot provoke that —
-encoding a `map[string]any` into an in-memory buffer does not fail — so the
-branch is left uncovered on purpose rather than faked with a contrived failing
-writer. It does nothing but log; there is no logic to get wrong.
-
-A `pre-push` hook (`.githooks/pre-push`) runs the same checks automatically and
-**aborts the push** if they fail, so nothing that breaks the suite reaches the
-remote. Git does not clone hook configuration, so enable it once per clone:
-
-```sh
-git config core.hooksPath .githooks
-```
-
-The hook is a local, fast gate on your machine; the
-[`Test`](.github/workflows/test.yaml) workflow is the independent cloud check
-(with `-race`) that also runs on anything pushed without the hook.
-
-## Status & roadmap
-
-The code is stable and the public API above is what it will remain. Packaging
-polish is still in progress:
-
-- [x] MIT `LICENSE`.
-- [x] Table-driven tests across all four packages — 100% on the domain
-      packages, 90.5% overall (`go test -race -cover ./...`), see
-      [Verification](#verification).
-- [ ] Published, versioned tags for `pkg.go.dev` indexing and semantic import
-      versioning.
-- [ ] Full RFC 9457 problem bodies behind `WriteProblem`.
+- [ ] Full RFC 9457 problem details behind `WriteProblem`, served as `application/problem+json`.
 
 ## License
 
-[MIT](LICENSE) © 2026 Ardian.
+[MIT](LICENSE) © 2026 Ardian
